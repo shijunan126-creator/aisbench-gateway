@@ -16,6 +16,28 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
 step() { printf '\n\033[1m[%s]\033[0m %s\n' "$1" "$2"; }
 
+# ---------------------------------------------------------------- 首次运行自举
+# 确保 config.ini 存在。
+#
+# 仓库里 config.ini 是 gitignore 的（各人宿主机路径不同，不该提交），
+# 它由 config.ini.example 复制而来 —— 后者由 gw/settings.py 的 TEMPLATE
+# 生成，保持单一真源，别手改。
+#
+# **不做这一步，全新克隆下来第一次 ./start.sh 会直接失败**：这些脚本是从
+# config.ini 用 awk 读镜像名的（不走 Python），读不到就把空字符串传给
+# docker run，报 `docker: invalid reference format`。实测踩到过。
+ensure_config() {
+  [ -f "$GW_CONFIG" ] && return 0
+  if [ -f "$GW_PKG_DIR/config.ini.example" ]; then
+    cp "$GW_PKG_DIR/config.ini.example" "$GW_CONFIG"
+    ok "已生成 config.ini（首次运行，来自 config.ini.example）"
+  else
+    bad "缺少 config.ini，也没有 config.ini.example"
+    echo "     交付包可能不完整；从仓库克隆的话请确认 config.ini.example 在。" >&2
+    return 1
+  fi
+}
+
 # ---------------------------------------------------------------- 配置读取
 #
 # 注意方括号的处理：节名是 `[aisbench]`，**不能**直接把 "[" section "]"

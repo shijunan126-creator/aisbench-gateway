@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . ./lib.sh
+ensure_config
 
 NAME="$(gw_container)"
 IMAGE="$(gw_image)"

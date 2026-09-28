@@ -1,0 +1,59 @@
+# AISBench 网关配置
+#
+# 改完这个文件后需要重启网关才生效：
+#   ./stop.sh && ./start.sh
+#
+# 注意：本文件是给**容器内**的网关读的，所以路径都是容器内路径。
+# 数据目录固定为 /work，由 start.sh 把宿主机上的 <本包目录>/data 挂过去。
+
+[server]
+# 监听地址。0.0.0.0 表示所有网卡，局域网内其他机器也能访问
+host = 0.0.0.0
+port = 8080
+
+[aisbench]
+# aisbench 镜像。升级时改这里的 tag，然后 ./stop.sh && ./start.sh
+# （start.sh 会发现镜像变了并重建容器）
+image = swr.cn-south-1.myhuaweicloud.com/ascendhub/aisbench_benchmark:v3.1-20260630-master-ubuntu22.04-py310
+# 网关容器名
+container = aisbench-gateway
+
+# 容器内的数据目录。start.sh 把宿主机的 <包目录>/data 挂到这里，**不要改**
+# ——生成的 mmengine 配置里写死了这个路径。
+data = /work
+
+# 本地 tokenizer 目录，多个用逗号分隔。填**宿主机**上的模型目录，
+# 由 start.sh 按原路径只读挂进容器。
+# 随机数据集(synthetic)和 sharegpt **必须**有 tokenizer，否则 aisbench 直接报错，
+# 而镜像里不带任何 tokenizer。
+# 也可以把 tokenizer 直接放进 <包目录>/data/models/，用 /work/models/<名字> 引用。
+tokenizer_dirs =
+
+[metrics]
+# 「采集 prefix cache 命中率」时去查哪些 /metrics 端点，逗号分隔，形如 ip:port。
+#
+# 留空 = 用被测服务自己的地址（base_url 的 host:port）。PD 混部填这个就够，
+# 大多数情况不需要改这里。
+# PD 分离时，填各个 **P 节点**的 IP 和它对应 DP 域的端口。
+# 查不到不会让任务失败，只会在结果里标注跳过原因。
+pods =
+
+[runner]
+# 压测任务串行执行，避免多个任务互相抢模型服务污染吞吐数据
+max_concurrent_jobs = 1
+# 单个任务的硬超时（秒），0 表示不限制
+job_timeout = 0
+# 无输出看门狗（秒）：日志超过这么久没有新增就判定卡死并终止。
+# aisbench 在某些环境下会偶发死锁（请求已发完但进程不退出），
+# 单 worker 串行时这种任务会把整个队列堵死，所以需要兜底。0 表示关闭。
+stall_timeout = 900
+
+[defaults]
+# 前端表单的初始值
+model =
+max_out_len = 512
+concurrency = 8
+num_prompts = 100
+num_warmups = 1
+temperature = 0.01
+ignore_eos = true

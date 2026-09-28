@@ -10,6 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . ./lib.sh
+ensure_config
 
 if ! require_docker; then exit 1; fi
 

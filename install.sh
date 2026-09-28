@@ -17,6 +17,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . ./lib.sh
+ensure_config
 
 ASSUME_YES=0
 PORT_OVERRIDE=""

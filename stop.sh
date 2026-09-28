@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . ./lib.sh
+ensure_config
 
 if ! command -v docker >/dev/null 2>&1; then
   bad "找不到 docker 命令"; exit 1
