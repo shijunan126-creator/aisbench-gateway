@@ -1,0 +1,30 @@
+# 运行时数据：任务产物、下载的数据集、合成数据集、SQLite 库、tokenizer。
+# 体积很大（本机 800M+）而且都是本机跑出来的东西，不该进仓库。
+data/
+
+# 打包产物（交付 tar.gz，1G+）
+dist/
+
+# 本机配置。含 tokenizer 的**宿主机路径**等机器相关信息；
+# 网关启动时若发现它不存在，会自动从 gw/settings.py 的 TEMPLATE 生成一份，
+# 所以新克隆下来直接跑就行，不需要这个文件。
+config.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 打包/分片产物
+*.tar
+*.tar.gz
+*.part-*
+SHA256SUMS
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+*.swp

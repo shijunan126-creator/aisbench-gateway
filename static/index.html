@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AISBench 网关</title>
+<link rel="stylesheet" href="/style.css">
+<!-- 本地 vendored，运行期零外网请求（来自镜像内的 plotly，与 aisbench 自身可视化同源） -->
+<script src="/vendor/plotly.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>AISBench 网关</h1>
+  <nav>
+    <button data-tab="run" class="active">测试任务</button>
+    <button data-tab="data">数据集</button>
+    <button data-tab="compare">结果对比</button>
+  </nav>
+  <div class="spacer"></div>
+  <span class="pill" id="container-pill">容器检测中…</span>
+  <button class="ghost sm" id="theme-toggle" title="切换深浅色">◐</button>
+</header>
+
+<main>
+
+<!-- ============================ 测试任务 ============================ -->
+<section class="tab active" id="tab-run">
+
+  <div class="card" id="form-card">
+    <h2>新建测试</h2>
+    <p class="sub">填写被测服务的接入信息，选择模式与数据集即可。精度和性能分别提交，产物会自动入库以便对比。</p>
+
+    <div class="grid" style="margin-top:14px">
+      <div class="field">
+        <label for="base_url">Base URL</label>
+        <input id="base_url" placeholder="http://127.0.0.1:8000/v1" value="http://127.0.0.1:8000/v1">
+        <span class="hint">结尾的 /v1 会自动去掉（aisbench 内部会自己拼 /v1/…，重复会导致 404）</span>
+      </div>
+      <div class="field">
+        <label for="api_type">接口类型</label>
+        <select id="api_type"></select>
+        <span class="hint">决定请求发往 /v1/completions 还是 /v1/chat/completions，以及是否流式</span>
+      </div>
+      <div class="field">
+        <label for="model">模型名</label>
+        <input id="model" placeholder="留空则调用 /v1/models 自动探测">
+      </div>
+      <div class="field">
+        <label for="api_key">API Key（可选）</label>
+        <input id="api_key" type="password" placeholder="留空则不发送 Authorization 头">
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <div class="segmented" id="mode-seg">
+        <button data-mode="perf" class="active">性能测试</button>
+        <button data-mode="accuracy">精度测试</button>
+      </div>
+      <span class="hint" id="mode-hint"></span>
+    </div>
+
+    <div class="grid" style="margin-top:14px">
+      <div class="field">
+        <label for="dataset">数据集</label>
+        <select id="dataset"></select>
+        <span class="hint" id="dataset-hint"></span>
+      </div>
+      <div class="field">
+        <label for="variant">配置变体</label>
+        <select id="variant"></select>
+      </div>
+      <div class="field" id="tok-field">
+        <label for="tokenizer_path">Tokenizer 路径（容器内路径）</label>
+        <input id="tokenizer_path" list="tok-options" placeholder="容器内路径，如 /work/models/qwen3">
+        <datalist id="tok-options"></datalist>
+        <span class="hint" id="tok-hint"><b id="tok-hint-label"></b><span id="tok-hint-rest"></span></span>
+      </div>
+    </div>
+
+    <!-- 并发：精度模式也用它控制跑得多快，所以两种模式都显示 -->
+    <div class="grid narrow" style="margin-top:14px;max-width:520px">
+      <div class="field">
+        <label for="concurrency">并发数</label>
+        <input id="concurrency" type="number" min="1" value="8">
+        <span class="hint">同时发出的请求数（aisbench 的 batch_size）</span>
+      </div>
+      <div class="field" id="acc-num-field" style="display:none">
+        <label for="acc_num_prompts">样本数上限</label>
+        <input id="acc_num_prompts" type="number" min="1" placeholder="留空则跑全量">
+        <span class="hint">截断面向前 N 条；得分只代表该子集</span>
+      </div>
+    </div>
+
+    <!-- 性能参数 -->
+    <div id="perf-params">
+      <div class="grid narrow" style="margin-top:14px">
+        <div class="field" id="sweep-field">
+          <label for="concurrency_list">并发档位（扫描模式）</label>
+          <input id="concurrency_list" placeholder="如 1,8,16,32,64">
+          <span class="hint">填了就按扫描模式串行跑完各档位并出曲线；留空则只跑上面的并发数</span>
+        </div>
+        <div class="field">
+          <label for="num_prompts">请求数</label>
+          <input id="num_prompts" type="number" min="1" value="100">
+          <span class="hint" id="num-prompt-hint"></span>
+        </div>
+        <div class="field">
+          <label for="max_out_len">最大输出长度</label>
+          <input id="max_out_len" type="number" min="1" value="512">
+          <span class="hint" id="maxout-hint"></span>
+        </div>
+        <div class="field">
+          <label for="num_warmups">预热请求数</label>
+          <input id="num_warmups" type="number" min="0" value="1">
+        </div>
+        <div class="field">
+          <label for="request_rate">限速 req/s</label>
+          <input id="request_rate" type="number" min="0" value="0">
+          <span class="hint">0 表示不限速</span>
+        </div>
+      </div>
+
+      <!-- 合成数据集（GSM8K 前缀数据集）的参数。默认展开：这里每一项
+           都直接决定生成出什么样的数据，藏起来用户没法判断该填什么。 -->
+      <details class="adv" id="gen-adv" open>
+        <summary>指定长度与前缀比例</summary>
+        <p class="sub" style="margin:6px 0 0 18px">
+          从内置 GSM8K 取语料，合成指定长度的数据集；填了前缀比例后，
+          每条请求的前若干 token 会在请求之间复用，用来测 prefix cache 命中下的性能。
+          中间会插入 3 个随机 token 保证每条请求内容不同。
+        </p>
+        <div class="grid">
+          <div class="field">
+            <label for="gen_len_mode">输入长度模式</label>
+            <select id="gen_len_mode">
+              <option value="fixed">定长</option>
+              <option value="uniform">均匀分布（区间内随机）</option>
+              <option value="gauss">高斯分布（均值±标准差）</option>
+            </select>
+          </div>
+          <div class="field" id="gen-fixed-field">
+            <label for="gen_input_len">输入长度</label>
+            <input id="gen_input_len" type="number" min="8" value="2048">
+          </div>
+          <div class="field gen-uni" id="gen-uni-min-field">
+            <label for="gen_len_min">长度下限</label>
+            <input id="gen_len_min" type="number" min="8" value="8192">
+          </div>
+          <div class="field gen-uni" id="gen-uni-max-field">
+            <label for="gen_len_max">长度上限</label>
+            <input id="gen_len_max" type="number" min="8" value="32768">
+          </div>
+          <div class="field gen-gauss" id="gen-gauss-mean-field">
+            <label for="gen_len_mean">长度均值</label>
+            <input id="gen_len_mean" type="number" min="8" value="32768">
+          </div>
+          <div class="field gen-gauss" id="gen-gauss-std-field">
+            <label for="gen_len_std">长度标准差</label>
+            <input id="gen_len_std" type="number" min="0" value="8192">
+          </div>
+          <div class="field">
+            <label for="gen_num">数据条数</label>
+            <input id="gen_num" type="number" min="1" value="100">
+            <span class="hint">即请求数</span>
+          </div>
+          <div class="field">
+            <label for="gen_prefix_ratio">前缀比例</label>
+            <input id="gen_prefix_ratio" value="50%">
+            <span class="hint">50% 或 0.5；0 表示不复用</span>
+          </div>
+          <div class="field">
+            <label for="gen_prefix_num">前缀个数</label>
+            <input id="gen_prefix_num" type="number" min="1" value="1">
+            <span class="hint">前缀的种类数</span>
+          </div>
+          <div class="field">
+            <label for="gen_dp">DP 域数</label>
+            <input id="gen_dp" type="number" min="1" value="1">
+            <span class="hint">预热阶段的并发</span>
+          </div>
+          <div class="field">
+            <label for="gen_seed">随机种子</label>
+            <input id="gen_seed" type="number" min="0" value="1">
+            <span class="hint">决定中间插入的随机 token</span>
+          </div>
+          <div class="field" style="justify-content:flex-end">
+            <label class="checkline"><input type="checkbox" id="gen_warmup" checked> 先预热前缀</label>
+            <label class="checkline"><input type="checkbox" id="gen_metrics" checked> 采集实际命中率</label>
+          </div>
+        </div>
+        <p class="sub" style="margin:10px 0 0 18px">
+          <b>前缀比例</b>指每条请求的前多少 token 会在请求之间复用（比如 50% 表示前一半能命中
+          KV cache）。<b>前缀个数</b>是前缀的种类数，每条数据轮流用其中一种。<br>
+          <b>预热</b>会先拿前缀单独跑一遍（并发 = DP 域数，不限速），让每个 DP 域的 KV cache
+          都吃到前缀，再跑正式数据集 —— 各 DP 域的 cache 不共享，不预热的话命中率会被稀释，
+          测不到稳态。输出长度用上面的「最大输出长度」。
+        </p>
+        <p class="sub" style="margin:6px 0 0 18px">
+          <b>实测长度会比这里填的略多</b>：一是 tokenize↔decode 往返有 ±1~2% 误差，
+          二是 aisbench 套 chat 模板会加角色标记（本机实测约 50 token）。
+          比如填 512，数据集里确实是 512，请求发出去时是 564。
+        </p>
+        <p class="sub" style="margin:6px 0 0 18px">
+          <b>采集实际命中率</b>会在压测前后各读一次被测服务的 <code>/metrics</code>，
+          用增量算出真实的 KV cache 命中率（对比页里可以和吞吐一起看）。
+          需要服务是 vLLM 且暴露了 <code>/metrics</code>；读不到只是不显示，
+          不会让任务失败。查哪个地址默认就是上面的 Base URL，PD 分离时在
+          <code>config.ini</code> 的 <code>[metrics] pods</code> 里配各个 P 节点。
+        </p>
+      </details>
+
+      <!-- 默认展开：随机数据集压测时输入/输出长度是最核心的参数，
+           之前折叠着导致用户以为没实现这个功能。 -->
+      <details class="adv" id="syn-adv" open>
+        <summary>随机数据集的输入/输出长度</summary>
+        <p class="sub" style="margin:6px 0 0 18px">
+          下限填跟上限一样即为固定长度；填不同值则在该区间内随机。
+          实测 token 数会比这里填的略多（aisbench 套 chat 模板会加角色标记）。
+        </p>
+        <div class="grid narrow">
+          <div class="field">
+            <label for="input_len_min">输入长度下限</label>
+            <input id="input_len_min" type="number" min="1" value="1024">
+          </div>
+          <div class="field">
+            <label for="input_len_max">输入长度上限</label>
+            <input id="input_len_max" type="number" min="1" value="1024">
+          </div>
+          <div class="field">
+            <label for="output_len_min">输出长度下限</label>
+            <input id="output_len_min" type="number" min="1" value="256">
+          </div>
+          <div class="field">
+            <label for="output_len_max">输出长度上限</label>
+            <input id="output_len_max" type="number" min="1" value="256">
+          </div>
+          <div class="field">
+            <label for="input_dist">输入分布</label>
+            <select id="input_dist">
+              <option value="uniform">均匀 uniform</option>
+              <option value="gaussian">高斯 gaussian</option>
+              <option value="zipf">齐夫 zipf</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="output_dist">输出分布</label>
+            <select id="output_dist">
+              <option value="uniform">均匀 uniform</option>
+              <option value="gaussian">高斯 gaussian</option>
+              <option value="zipf">齐夫 zipf</option>
+            </select>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="grid" style="margin-top:14px;max-width:760px" id="misc-params">
+      <div class="field">
+        <label for="temperature">temperature</label>
+        <input id="temperature" type="number" step="0.01" value="0.01">
+      </div>
+      <div class="field" style="justify-content:flex-end">
+        <label class="checkline"><input type="checkbox" id="ignore_eos" checked> ignore_eos（压满输出长度）</label>
+      </div>
+    </div>
+
+    <div class="field" style="margin-top:16px;max-width:760px">
+      <label for="job_note">备注（可选）</label>
+      <input id="job_note" maxlength="200"
+             placeholder="给这次测试起个名字，如「Qwen3-32B / 4k 输入 / 并发 32」">
+      <span class="hint">
+        会显示在任务列表和结果对比里。多组参数对比时，填了才分得清哪条是哪条
+        （不填则用自动生成的标题）。跑完也能在详情页里补。
+      </span>
+    </div>
+
+    <div class="row end" style="margin-top:14px">
+      <span class="hint" id="submit-hint"></span>
+      <button class="primary" id="submit-btn">提交测试</button>
+    </div>
+  </div>
+
+  <!-- 任务列表 -->
+  <div class="card" id="list-card">
+    <div class="row">
+      <h2 style="margin:0">任务列表</h2>
+      <div class="spacer" style="flex:1"></div>
+      <button class="ghost sm" id="refresh-jobs">刷新</button>
+    </div>
+    <div id="job-list" style="margin-top:12px"></div>
+  </div>
+
+  <!-- 任务详情 -->
+  <div class="card" id="detail-card" style="display:none">
+    <div class="row">
+      <button class="ghost sm" id="detail-back">← 返回列表</button>
+      <div class="spacer" style="flex:1"></div>
+      <button class="ghost sm" id="detail-reparse" title="按当前解析逻辑重新读取磁盘产物，不必重跑压测">重新解析产物</button>
+      <button class="danger sm" id="detail-cancel" style="display:none">取消</button>
+      <button class="ghost sm" id="detail-delete">删除</button>
+    </div>
+    <div id="detail-body" style="margin-top:14px"></div>
+  </div>
+</section>
+
+<!-- ============================ 数据集 ============================ -->
+<section class="tab" id="tab-data">
+  <div class="card">
+    <div class="row">
+      <div>
+        <h2>数据集管理</h2>
+        <p class="sub">镜像里只内置了 synthetic 随机数据集；其余数据集需要下载后才能跑。下载到网关数据目录，容器通过 AIS_BENCH_DATASETS_CACHE 共享。</p>
+      </div>
+      <div class="spacer" style="flex:1"></div>
+      <button class="ghost sm" id="refresh-datasets">刷新</button>
+    </div>
+    <div id="dataset-list" style="margin-top:14px"></div>
+  </div>
+</section>
+
+<!-- ============================ 结果对比 ============================ -->
+<section class="tab" id="tab-compare">
+  <div class="card">
+    <div class="row">
+      <div>
+        <h2>结果对比</h2>
+        <p class="sub">勾选若干条运行记录进行叠图对比。颜色跟随运行记录本身，取消勾选不会让其余曲线变色。</p>
+      </div>
+      <div class="spacer" style="flex:1"></div>
+      <select id="compare-kind" style="width:auto">
+        <option value="perf">性能结果</option>
+        <option value="accuracy">精度结果</option>
+      </select>
+      <button class="ghost sm" id="refresh-results">刷新</button>
+    </div>
+    <div id="result-list" style="margin-top:12px"></div>
+  </div>
+  <div id="compare-charts"></div>
+</section>
+
+</main>
+
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
