@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AISBench 网关</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M9 21l4.5-10h1.4L19.5 21h-1.7l-1.1-2.7h-4.9L10.7 21H9zm3.3-4h3.8l-1.9-4.6L12.3 17z' fill='%23fff'/%3E%3Crect x='21.5' y='10' width='2' height='11' rx='1' fill='%23fff' opacity='.85'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 <!-- 本地 vendored，运行期零外网请求（来自镜像内的 plotly，与 aisbench 自身可视化同源） -->
 <script src="/vendor/plotly.min.js"></script>
@@ -11,7 +12,13 @@
 <body>
 
 <header>
-  <h1>AISBench 网关</h1>
+  <div class="brand">
+    <div class="brand-mark">AB</div>
+    <div>
+      <h1>AISBench 网关</h1>
+      <span class="brand-sub">模型评测与压测工作台</span>
+    </div>
+  </div>
   <nav>
     <button data-tab="run" class="active">测试任务</button>
     <button data-tab="data">数据集</button>
@@ -71,8 +78,8 @@
         <select id="variant"></select>
       </div>
       <div class="field" id="tok-field">
-        <label for="tokenizer_path">Tokenizer 路径（容器内路径）</label>
-        <input id="tokenizer_path" list="tok-options" placeholder="容器内路径，如 /work/models/qwen3">
+        <label for="tokenizer_path">模型 / Tokenizer 目录</label>
+        <input id="tokenizer_path" list="tok-options" placeholder="填模型目录名，如 Qwen3.5-35B-A3B（下拉可选）">
         <datalist id="tok-options"></datalist>
         <span class="hint" id="tok-hint"><b id="tok-hint-label"></b><span id="tok-hint-rest"></span></span>
       </div>
@@ -340,6 +347,10 @@
 </section>
 
 </main>
+
+<footer class="site-footer">
+  AISBench 网关 · 零第三方依赖，所有数据都留在本机
+</footer>
 
 <div class="toast" id="toast"></div>
 <script src="/app.js"></script>

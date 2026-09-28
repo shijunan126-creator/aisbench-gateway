@@ -64,22 +64,94 @@ def h_config(_m, _q, _b) -> Response:
     return 200, "application/json; charset=utf-8", json_bytes({
         "api_types": catalog.API_TYPES,
         "defaults": settings.defaults,
-        "tokenizer_dirs": tokenizer_candidates(),
+        "tokenizer_dirs": settings.tokenizer_dirs,
+        "tokenizer_candidates": tokenizer_candidates(),
         "selfcheck": runtime.selfcheck(settings),
         "container_name": settings.container,
         "models_mount": str(settings.models_dir),
     })
 
 
-def tokenizer_candidates() -> List[str]:
-    """可选 tokenizer 路径 = config 里配的 + data/models 下扫到的（容器内路径）。"""
-    out: List[str] = list(settings.tokenizer_dirs)
-    md = settings.models_dir
-    if md.exists():
-        for p in sorted(md.iterdir()):
-            if p.is_dir():
-                out.append(f"{settings.models_dir}/{p.name}")
-    return out
+# 常见 tokenizer/模型目录的特征文件。HuggingFace/ModelScope 下载的模型目录
+# 都会带其中若干个，据此把「装了模型的文件夹」从一堆目录里认出来。
+_TOKENIZER_MARKER_FILES = (
+    "tokenizer.json", "tokenizer_config.json", "vocab.json", "vocab.txt",
+    "merges.txt", "spiece.model", "sentencepiece.bpe.model", "tokenizer.model",
+)
+
+
+def _looks_like_model_dir(p: Path) -> bool:
+    return p.is_dir() and any((p / f).is_file() for f in _TOKENIZER_MARKER_FILES)
+
+
+def tokenizer_candidates() -> List[Dict[str, str]]:
+    """扫描可用的模型/tokenizer 目录，供页面下拉选择。
+
+    config.ini 的 aisbench.tokenizer_dirs 里可以填两种目录：
+      - 模型目录本身（含 tokenizer.json 等特征文件）
+      - 装了多个模型的**父目录**（如 /data/models）——扫描其下一层子目录
+    加上数据目录自带的 data/models/<名字>。
+
+    返回 [{name, path}, ...]：name 是模型目录名（页面上填/选它），
+    path 是容器内完整路径（提交时由 resolve_tokenizer_path 拼回去）。
+    """
+    out: Dict[str, str] = {}
+
+    def add(path: Path) -> None:
+        if _looks_like_model_dir(path):
+            out.setdefault(path.name, str(path))
+
+    bases = list(settings.tokenizer_dirs) + [str(settings.models_dir)]
+    for raw in bases:
+        base = Path(raw)
+        if not base.is_dir():
+            continue
+        add(base)
+        for sub in sorted(base.iterdir()):
+            if sub.name.startswith(".") or not sub.is_dir():
+                continue
+            add(sub)
+    return [{"name": n, "path": p} for n, p in sorted(out.items())]
+
+
+def resolve_tokenizer_path(raw: str) -> str:
+    """把页面填的 tokenizer 路径解析成容器内完整路径。
+
+    允许三种写法（对应不同习惯）：
+      - 完整容器内路径：存在即原样接受
+      - 模型目录名：如 Qwen3.5-35B-A3B，在 tokenizer_dirs / data/models 下找同名目录
+      - 相对路径：如 models/Qwen3 或 …/tokenizer.json（填到文件上取其目录）
+
+    找不到时抛 400，并把当前可选的模型名列出来，省得用户猜。
+    """
+    p = (raw or "").strip()
+    if not p:
+        return p
+    if Path(p).exists():
+        return p
+    cands = tokenizer_candidates()
+    by_name = {c["name"]: c["path"] for c in cands}
+    if p in by_name:
+        return by_name[p]
+    for base in list(settings.tokenizer_dirs) + [str(settings.models_dir)]:
+        cand = Path(base) / p.lstrip("/")
+        if cand.exists():
+            if cand.is_file():
+                cand = cand.parent
+            return str(cand)
+    # 兜底：用户把完整路径填成了别的容器外形态（比如宿主机路径），
+    # 取最后一段当目录名再试一次
+    tail_name = p.rstrip("/").rsplit("/", 1)[-1]
+    if tail_name in by_name:
+        return by_name[tail_name]
+    names = "\n  - ".join(sorted(by_name)) if by_name else "（无）"
+    raise ApiError(
+        400,
+        f"找不到模型/tokenizer 目录「{p}」。\n"
+        f"当前扫描到的模型目录：\n  - {names}\n"
+        "请从上面选一个，或在 config.ini 的 aisbench.tokenizer_dirs 里"
+        "配置模型所在目录后重启网关。",
+    )
 
 
 def h_selfcheck(_m, _q, _b) -> Response:
@@ -146,6 +218,11 @@ def h_jobs_submit(_m, _q, body) -> Response:
     except (ValueError, dataset_gen.GenError) as e:
         raise ApiError(400, str(e)) from e
 
+    # 页面里可以只填模型目录名（如 Qwen3.5-35B-A3B），这里解析成容器内完整
+    # 路径再入库——后续 confgen 写配置、数据集生成都直接用，不用再各处兜底。
+    # 提前到提交时解析：填错立刻反馈，而不是等 aisbench 跑起来才炸。
+    if params.get("tokenizer_path"):
+        params["tokenizer_path"] = resolve_tokenizer_path(params["tokenizer_path"])
     _check_tokenizer(params)
 
     label = body.get("label") or f"{ds['label']} · {'精度' if mode == 'accuracy' else '性能'}"
@@ -257,30 +334,71 @@ def h_job_reparse(m, _q, _b) -> Response:
 
 
 def h_job_log(m, q, _b) -> Response:
-    """增量拉取日志；offset 是已读字节数。"""
+    """增量拉取日志；offset 是已读字节数。
+
+    `tail` 参数（字节）只在首次打开时用：直接从文件**末尾**往前取这么多开始读，
+    跳过的部分由返回值 `skipped` 告知。长压测的 run.log 能有几百 MB，
+    而用户关心的是最新的输出（以及失败时网关抽取到错误卡片里的原因），
+    从头逐块下载只是浪费。
+    """
     jid = m.group("jid")
     job = store.get_job(jid)
     if not job:
         raise ApiError(404, "任务不存在")
     # 负数也要挡住：文件对象的 seek(-1) 会抛 OSError 变成 500
     offset = max(0, _int_arg(q, "offset", 0))
+    tail = max(0, _int_arg(q, "tail", 0))
 
     path = settings.outputs_dir / jid / "run.log"
     if not path.exists():
         return 200, "application/json; charset=utf-8", json_bytes(
-            {"text": "", "offset": 0, "status": job["status"]})
+            {"text": "", "offset": 0, "size": 0, "skipped": 0, "status": job["status"]})
 
     size = path.stat().st_size
     if offset > size:  # 文件被截断/重建
         offset = 0
+
+    start = offset
+    skipped = 0
+    want = _LOG_CHUNK
+    if tail and start == 0 and size > tail:
+        start = size - tail
+        # 对齐到下一个行首：从任意字节处开读会把首行劈成两半。
+        # 日志是行式的，跳到下一个换行即可；探测窗口给 4KB，兼容长行。
+        with path.open("rb") as f:
+            f.seek(start)
+            probe = f.read(4096)
+        nl = probe.find(b"\n")
+        if nl >= 0:
+            start += nl + 1
+        skipped = start
+        # tail 请求一次给全（上限 MAX_LOG_TAIL）：已结束的任务前端只拉这一次，
+        # 若还按 256KB 分块，用户看到的会是尾部区域**最老**的一段而不是结果输出。
+        # 增量轮询（offset>0）不受影响，仍按 _LOG_CHUNK 分块。
+        want = min(tail, _MAX_LOG_TAIL)
+
     with path.open("rb") as f:
-        f.seek(offset)
-        # 单次最多回这么多：首次打开（offset=0）时整个 run.log 可能有几百 MB，
-        # 整读会把容器内存吃掉，而日志是增量轮询的，剩下的下次再取。
-        data = f.read(_LOG_CHUNK)
+        f.seek(start)
+        # 常规增量单次最多 _LOG_CHUNK：首次打开（offset=0）时整个 run.log
+        # 可能有几百 MB，整读会把容器内存吃掉，剩下的下次再取。
+        data = f.read(want)
+    # 按 UTF-8 字符边界截尾：定长读取可能正好切在多字节字符中间，
+    # 直接 decode 会把边界字符变成乱码 �。只消费完整前缀（offset 也只前移到这），
+    # 不完整的尾部留到下一次读取，最多回退 3 字节（UTF-8 序列最长 4 字节）。
+    for back in range(4):
+        try:
+            text = data[: len(data) - back or None].decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = data.decode("utf-8", errors="replace")
+        back = 0
     return 200, "application/json; charset=utf-8", json_bytes({
-        "text": data.decode("utf-8", errors="replace"),
-        "offset": offset + len(data),
+        "text": text,
+        "offset": start + len(data) - back,
+        "size": size,
+        "skipped": skipped,
         "status": job["status"],
     })
 
@@ -348,6 +466,9 @@ _MAX_BODY = 1 << 20
 # 剩下的下次再取。
 _LOG_CHUNK = 256 * 1024
 
+# tail 参数的上限（见 h_job_log）：太大等于把整读的内存问题又请回来
+_MAX_LOG_TAIL = 8 * 1024 * 1024
+
 ROUTES: List[Tuple[str, "re.Pattern[str]", Callable]] = [
     ("GET", re.compile(r"^/api/health$"), h_health),
     ("GET", re.compile(r"^/api/config$"), h_config),
@@ -389,13 +510,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._handle("GET")
 
+    def do_HEAD(self) -> None:
+        # 探活/下载工具常用 HEAD；无 body，其余语义同 GET
+        self._handle("GET", head_only=True)
+
     def do_POST(self) -> None:
         self._handle("POST")
 
     def do_DELETE(self) -> None:
         self._handle("DELETE")
 
-    def _handle(self, method: str) -> None:
+    def _handle(self, method: str, head_only: bool = False) -> None:
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = parse_qs(parsed.query)
@@ -409,7 +534,10 @@ class Handler(BaseHTTPRequestHandler):
                 m = pattern.match(path)
                 if m:
                     status, ctype, payload = fn(m, query, body)
-                    self._send(status, ctype, payload)
+                    if head_only:
+                        self._send_headers_only(status, ctype, len(payload))
+                    else:
+                        self._send(status, ctype, payload)
                     return
 
             if method == "GET":
@@ -417,7 +545,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._serve_artifact(path[len("/api/artifacts/"):])
                     return
                 if not path.startswith("/api/"):
-                    self._serve_static(path)
+                    self._serve_static(path, head_only=head_only)
                     return
 
             self._send(*err(404, f"没有这个接口: {method} {path}"))
@@ -465,8 +593,45 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _send_headers_only(self, status: int, ctype: str, length: int) -> None:
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(length))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_file(self, status: int, ctype: str, path: Path,
+                   cache: bool = False, head_only: bool = False) -> None:
+        """流式发送文件。
+
+        产物（逐请求明细 jsonl、run.log）在长压测下能有几百 MB，
+        read_bytes 整读会把容器内存吃掉——网关和 aisbench 同住一个容器，
+        内存被吃光就是压测现场直接挂。Content-Length 已知，按块搬运即可。
+        """
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(path.stat().st_size))
+            # vendor 库（plotly 4.8MB）内容只随代码更新，允许浏览器缓存；
+            # 其余保持 no-store，保证改前端刷新即生效
+            self.send_header("Cache-Control", "max-age=86400" if cache else "no-store")
+            self.end_headers()
+            if head_only:
+                return
+            with path.open("rb") as f:
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     # ---- 静态文件 ----
-    def _serve_static(self, path: str) -> None:
+    def _serve_static(self, path: str, head_only: bool = False) -> None:
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         target = (STATIC_DIR / rel).resolve()
         try:
@@ -480,12 +645,8 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript",):
             ctype += "; charset=utf-8"
-        try:
-            data = target.read_bytes()
-        except OSError as e:
-            self._send(*err(500, f"读取文件失败: {e}"))
-            return
-        self._send(200, ctype, data)
+        self._send_file(200, ctype, target, cache=rel.startswith("vendor/"),
+                        head_only=head_only)
 
     # ---- 产物文件 ----
     def _serve_artifact(self, rel: str) -> None:
@@ -510,12 +671,7 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "text/plain; charset=utf-8"
         else:
             ctype = "application/octet-stream"
-        try:
-            data = target.read_bytes()
-        except OSError as e:
-            self._send(*err(500, f"读取文件失败: {e}"))
-            return
-        self._send(200, ctype, data)
+        self._send_file(200, ctype, target)
 
 
 # ------------------------------------------------------------------ 启动

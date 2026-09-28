@@ -391,7 +391,8 @@ class Runner:
                 break
             if self.s.stall_timeout and now - last_output > self.s.stall_timeout:
                 timed_out = (f"日志超过 {self.s.stall_timeout}s 无任何新增，判定卡死并终止。"
-                             "aisbench 在 QEMU 模拟环境下偶发此问题；真机一般不会。")
+                             "可查看任务日志确认是服务端无响应还是 aisbench 本身卡住；"
+                             "偶发卡死时重提任务即可。")
                 break
             if proc.poll() is not None and q.empty():
                 break

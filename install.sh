@@ -2,15 +2,15 @@
 # ============================================================
 #  AISBench 网关 —— 一键开局
 #
-#  做四件事：检查环境 → 导入镜像 → 准备数据与配置 → 启动服务
+#  做五件事：检查环境 → 架构校验 → 配置模型目录 → 导入镜像 → 启动
 #  可以重复执行（幂等），中途出错修好后直接重跑即可。
 #
 #  客户机器**只需要 Docker** ——不需要 python3，不需要联网，不需要 pip。
 #
-#    ./install.sh                交互安装
-#    ./install.sh --yes          全部用默认值，不提问
-#    ./install.sh --port 9000    指定端口
-#    ./install.sh --tokenizer /path/to/model
+#    ./install.sh                        交互安装（会强制要求模型/tokenizer 目录）
+#    ./install.sh --tokenizer /path/to   非交互指定模型/tokenizer 目录
+#    ./install.sh --yes --tokenizer /p   全部用默认值（--yes 必须配 --tokenizer）
+#    ./install.sh --port 9000            指定端口
 # ============================================================
 set -uo pipefail
 
@@ -47,18 +47,89 @@ ask() {  # ask <提示> <默认值> → REPLY
   return 0
 }
 
+# 目录里是否像是个 tokenizer/模型目录。列表没有穷举（自定义 tokenizer
+# 可能只有 config.json + 权重），只做提醒用，不是硬校验。
+looks_like_tokenizer() {
+  local d="$1" f
+  for f in tokenizer.json tokenizer_config.json vocab.json vocab.txt \
+           merges.txt spiece.model sentencepiece.bpe.model tokenizer.model; do
+    [ -f "$d/$f" ] && return 0
+  done
+  return 1
+}
+
+# ---------- 模型/tokenizer 目录（强制配置） ----------
+#
+# 随机数据集 / sharegpt / GSM8K 前缀数据集没有它跑不了，而每台机器的
+# 模型路径都不一样，所以安装时**必须**给一个，不能留空跳过：
+#   - 交互模式：循环要求输入，目录不存在就重新输入
+#   - --yes / 非交互：必须配 --tokenizer 参数，否则直接报错
+#   - config.ini 里已经配过：回车即可保留（重复执行安装不用重填）
+require_tokenizer() {
+  local existing input
+  existing="$(ini_get aisbench tokenizer_dirs)"
+
+  if [ -n "$TOKENIZER_INPUT" ]; then
+    # --tokenizer 参数：直接采用，目录不对就中止
+    if [ ! -d "$TOKENIZER_INPUT" ]; then
+      die "--tokenizer 目录不存在：$TOKENIZER_INPUT"
+    fi
+    REPLY="$(cd "$TOKENIZER_INPUT" && pwd)"
+  elif [ -n "$existing" ]; then
+    ask "模型/tokenizer 目录（回车保留现有：$existing）" "$existing"
+  else
+    printf '  模型/tokenizer 目录（必填）：随机数据集、GSM8K 前缀数据集、sharegpt\n'
+    printf '  都需要它做 token 计数。填模型所在目录，或装了多个模型的父目录，如\n'
+    printf '  /data/models （网关会扫描其中的模型文件夹，页面上按名字选择）\n'
+    while : ; do
+      if ! is_tty || [ "$ASSUME_YES" = "1" ]; then
+        die "未提供模型/tokenizer 目录。非交互安装必须加参数：./install.sh --tokenizer /path/to/model"
+      fi
+      printf '  目录路径: '
+      read -r input || input=""
+      [ -z "$input" ] && { bad "不能为空，请输入模型/tokenizer 目录"; continue; }
+      if [ ! -d "$input" ]; then
+        bad "目录不存在：$input，请重新输入"
+        continue
+      fi
+      REPLY="$input"
+      break
+    done
+  fi
+
+  TOK_ABS="$(cd "$REPLY" && pwd)"
+  if looks_like_tokenizer "$TOK_ABS"; then
+    ok "已配置模型/tokenizer 目录：$TOK_ABS"
+  else
+    # 不是模型目录本身？按装了多个模型的父目录处理，扫一层子目录
+    N_FOUND=0
+    for sub in "$TOK_ABS"/*/; do
+      [ -d "$sub" ] || continue
+      if looks_like_tokenizer "${sub%/}"; then N_FOUND=$((N_FOUND+1)); fi
+    done
+    if [ "$N_FOUND" -gt 0 ]; then
+      ok "已配置模型目录：$TOK_ABS（识别到其中 ${N_FOUND} 个模型文件夹，页面上按名字选择）"
+    else
+      warn "目录及其一级子目录里都没找到 tokenizer.json / vocab.json 等特征文件"
+      echo "     如果这里放的是完整模型目录（含权重），忽略此提醒即可。"
+    fi
+  fi
+  ini_set aisbench tokenizer_dirs "$TOK_ABS"
+  echo "     该目录按原路径只读挂进容器；改动后需 ./stop.sh && ./start.sh 重建容器。"
+}
+
 echo "============================================"
 echo "  AISBench 网关 安装程序"
 echo "  目录：$GW_PKG_DIR"
 echo "============================================"
 
 # ---------- 1. Docker ----------
-step 1/5 "检查 Docker"
+step 1/6 "检查 Docker"
 require_docker || exit 1
 ok "Docker 可用（$(docker --version 2>/dev/null | head -c 50)）"
 
 # ---------- 2. 架构 ----------
-step 2/5 "检查机器架构"
+step 2/6 "检查机器架构"
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
   x86_64|amd64)   HOST_ARCH=amd64 ;;
@@ -96,8 +167,12 @@ else
   warn "包里没有 manifest.json，无法确认镜像架构，继续安装"
 fi
 
-# ---------- 3. 镜像 ----------
-step 3/5 "导入 aisbench 镜像"
+# ---------- 3. 模型/tokenizer 目录（强制） ----------
+step 3/6 "配置模型/tokenizer 目录（必填）"
+require_tokenizer
+
+# ---------- 4. 镜像 ----------
+step 4/6 "导入 aisbench 镜像"
 
 IMAGE="$(gw_image)"
 [ -z "$IMAGE" ] && die "config.ini 里没读到 aisbench.image，请检查配置文件"
@@ -146,8 +221,8 @@ else
   echo "               ② 镜像层数据缺失（交付包损坏，重新解压一次）"
 fi
 
-# ---------- 4. 数据与配置 ----------
-step 4/5 "准备数据与配置"
+# ---------- 5. 数据与配置 ----------
+step 5/6 "准备数据与配置"
 
 # generated/ 放合成数据集（GSM8K 前缀数据集），网关启动时也会建，
 # 这里先建出来是为了让客户一眼能看到数据目录里有哪几块
@@ -172,30 +247,7 @@ else
   warn "交付包里没有预置数据集（seed/ 缺失），可在页面上按需下载"
 fi
 
-# tokenizer（可选）
-echo
-echo "  随机数据集(synthetic)和 sharegpt 需要一个本地 tokenizer 才能跑，"
-echo "  aisbench 镜像里不带。两种配法："
-echo "    - 现在指定宿主机上的模型目录（下面填）"
-echo "    - 或稍后把 tokenizer 放进 $GW_DATA_HOST/models/ ，页面上写 /work/models/<名字>"
-echo
-TOK=""
-if [ -n "$TOKENIZER_INPUT" ]; then
-  TOK="$TOKENIZER_INPUT"
-elif [ "$ASSUME_YES" != "1" ] && is_tty; then
-  ask "tokenizer 所在目录（留空跳过）" ""
-  TOK="$REPLY"
-fi
-
-if [ -n "${TOK:-}" ]; then
-  if [ -d "$TOK" ]; then
-    TOK_ABS="$(cd "$TOK" && pwd)"
-    ini_set aisbench tokenizer_dirs "$TOK_ABS"
-    ok "已配置 tokenizer 目录：$TOK_ABS"
-  else
-    warn "目录不存在，已忽略：$TOK"
-  fi
-fi
+# tokenizer 已在第 3 步强制配置（require_tokenizer）
 
 if [ -n "$PORT_OVERRIDE" ]; then
   ini_set server port "$PORT_OVERRIDE"
@@ -205,7 +257,7 @@ ok "配置文件：$GW_CONFIG"
 ok "数据目录：$GW_DATA_HOST"
 
 # ---------- 5. 启动 ----------
-step 5/5 "启动服务"
+step 6/6 "启动服务"
 
 # 配置变了（端口/镜像/tokenizer）就要重建容器才生效
 if container_exists; then

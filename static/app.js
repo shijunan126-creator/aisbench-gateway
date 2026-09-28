@@ -133,24 +133,24 @@ async function init() {
   await loadJobs();
 }
 
-/* tokenizer 路径：可自由输入，候选来自 config.ini 的 tokenizer_dirs
-   以及 <数据目录>/models 下扫到的目录（容器内路径 /work/models/<名字>）。 */
+/* tokenizer 路径：页面上只填/选**模型目录名**（如 Qwen3.5-35B-A3B），
+   提交时后端自动解析成容器内完整路径。
+   候选来自 /api/config 的 tokenizer_candidates：config.ini 里配的模型目录
+   （或其父目录）+ 数据目录 models/ 下扫到的。 */
 function renderTokenizerOptions() {
-  const dirs = state.config?.tokenizer_dirs || [];
+  const cands = state.config?.tokenizer_candidates || [];
   const mount = state.config?.models_mount || '/work/models';
-  $('#tok-options').innerHTML = dirs.map(d => `<option value="${d}"></option>`).join('');
-  // 强调「容器内路径」：真正读这个值的是容器里的 aisbench（生成数据集时是网关进程，
-  // 同样在容器内），宿主机上的路径如果没挂进容器，填了也无效。
-  // 前半段「哪些数据集必填」由 syncForm 按当前数据集切换，这里只写后半段，
-  // 整体赋值会把那个标签一起冲掉。
+  $('#tok-options').innerHTML = cands.map(c =>
+    `<option value="${escapeHtml(c.name)}"></option>`).join('');
+  const bases = state.config?.tokenizer_dirs || [];
   $('#tok-hint-rest').textContent =
-    `，用于本地 token 计数。填容器内路径（不是宿主机路径）——读它的是容器里的进程。` +
-    `两种配法：① 把 tokenizer 放进数据目录的 models/，这里填 ${mount}/<名字>；` +
-    `② 在宿主 config.ini 的 aisbench.tokenizer_dirs 里配模型目录，` +
-    `它按原路径挂载，所以容器内路径与宿主机相同。`;
+    `，用于本地 token 计数。填模型目录名即可（下拉可选），也可填完整容器内路径。` +
+    (bases.length
+      ? `已扫描 ${bases.join('、')}（里面的模型文件夹会自动列出，目前 ${cands.length} 个）。`
+      : `也可以把 tokenizer 放进数据目录的 ${mount}/ 下。`);
   // 只有一个候选时直接填上，省得手输
-  if (dirs.length === 1 && !$('#tokenizer_path').value) {
-    $('#tokenizer_path').value = dirs[0];
+  if (cands.length === 1 && !$('#tokenizer_path').value) {
+    $('#tokenizer_path').value = cands[0].name;
   }
 }
 
@@ -411,6 +411,14 @@ async function loadJobs() {
   if (!state.detailJob) renderJobs();
 }
 
+/* 有任务在排队/运行时自动刷新列表（压测一跑几十分钟，状态与
+   "2/2 档完成"不刷新的话用户只能一直手点"刷新"；全部到终态后自动停）。 */
+setInterval(() => {
+  if (document.hidden) return;
+  const active = (j) => ['queued', 'running'].includes(j.status);
+  if (state.jobs.some(j => active(j) || (j.children || []).some(active))) loadJobs();
+}, 4000);
+
 function statusHtml(s) {
   const names = { queued: '排队中', running: '运行中', succeeded: '成功',
                   failed: '失败', cancelled: '已取消' };
@@ -660,11 +668,15 @@ async function refreshDetail() {
   } else {
     // 注意：不要在这里放「产物目录」链接 —— artifacts 接口只提供文件，
     // 指向目录会 404。单个产物的链接在同数据集的性能结果卡片里。
-    body += `<div class="card" style="margin-top:14px">
-      <h3 style="font-size:13.5px;margin:0 0 10px">运行日志</h3>
-      ${job.run_dir ? `<p class="sub mono" style="margin-bottom:8px">产物: ${escapeHtml(job.run_dir)}</p>` : ''}
+    //
+    // 默认折叠：用户要看的是上面的结果表格和命中率，日志是排查时的兜底。
+    // 任务在跑时保持展开（生成数据集的实时进度在这里）；跑完自动收起。
+    const running = ['queued', 'running'].includes(job.status);
+    body += `<details class="card log-fold" id="log-fold" ${running ? 'open' : ''}>
+      <summary>运行日志${running ? '（实时）' : '<span class="sub">排查时展开</span>'}</summary>
+      ${job.run_dir ? `<p class="sub mono" style="margin:8px 0">产物: ${escapeHtml(job.run_dir)}</p>` : ''}
       <pre class="log" id="log-pre">连接中…</pre>
-    </div>`;
+    </details>`;
   }
 
   $('#detail-body').innerHTML = body;
@@ -775,14 +787,26 @@ function stopLog() {
 /* 日志缓冲区独立于 DOM。
    原因：任务处于终态时 refreshDetail() 会重建整块 #detail-body，
    直接把日志区打回初始状态；而轮询此时已经停止，界面就永远停在"连接中…"。
-   把已收到的内容存在这里，重建 DOM 后重新画上去即可。 */
-const logState = { id: null, offset: 0, buf: '', lastStatus: null };
+   把已收到的内容存在这里，重建 DOM 后重新画上去即可。
+
+   缓冲区有上限：长压测的 run.log 能有几百 MB，全部攒在内存里再把整段
+   塞进 <pre> 会把浏览器标签页卡死。只保留最近一段，截断处在开头注明。 */
+const LOG_KEEP_BYTES = 1_500_000;
+const logState = { id: null, primed: false, offset: 0, buf: '', truncated: false, lastStatus: null };
+
+function fmtBytes(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + ' GB';
+  if (n >= 1e6) return (n / 1e6).toFixed(0) + ' MB';
+  return Math.max(1, Math.round(n / 1e3)) + ' KB';
+}
 
 function paintLog() {
   const el = $('#log-pre');
   if (!el) return;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-  el.textContent = logState.buf || '（暂无输出）';
+  const head = logState.truncated
+    ? `…（日志很长，开头 ${fmtBytes(logState.dropped)} 已省略，只显示最新部分；完整内容见产物 run.log）\n` : '';
+  el.textContent = head + (logState.buf || '（暂无输出）');
   if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
@@ -790,8 +814,11 @@ function startLog(id) {
   stopLog();
   if (logState.id !== id) {
     logState.id = id;
+    logState.primed = false;
     logState.offset = 0;
     logState.buf = '';
+    logState.truncated = false;
+    logState.dropped = 0;
     logState.lastStatus = null;
   }
   paintLog();
@@ -799,10 +826,29 @@ function startLog(id) {
   const tick = async () => {
     if (state.detailJob !== id) { stopLog(); return; }
     try {
-      const r = await api(`/api/jobs/${id}/log?offset=${logState.offset}`);
+      // 首次打开直接从**末尾**取最近一段（tail 参数）：用户关心的是最新输出，
+      // 从头把几百 MB 的 run.log 逐块下载完没有意义。失败的原因网关已抽出来
+      // 放在详情页的「错误」卡片里，不靠翻日志。
+      const q = logState.primed
+        ? `offset=${logState.offset}`
+        : `offset=0&tail=${LOG_KEEP_BYTES}`;
+      const r = await api(`/api/jobs/${id}/log?` + q);
+      logState.primed = true;
+      if (r.skipped) {
+        logState.truncated = true;
+        logState.dropped = r.skipped;
+      }
       if (r.text) {
         logState.offset = r.offset;
         logState.buf += r.text;
+        if (logState.buf.length > LOG_KEEP_BYTES) {
+          const drop = logState.buf.length - LOG_KEEP_BYTES;
+          // 按行截断，避免把半行留在开头
+          const nl = logState.buf.indexOf('\n', drop);
+          logState.buf = logState.buf.slice(nl >= 0 ? nl + 1 : drop);
+          logState.truncated = true;
+          logState.dropped = (logState.dropped || 0) + drop;
+        }
         paintLog();
       }
       if (['succeeded', 'failed', 'cancelled'].includes(r.status)) {
@@ -941,7 +987,7 @@ function renderResults() {
       <td class="num">${kind === 'perf' ? conc : '—'}</td>
       <td class="mono">${escapeHtml(p.api_type || '—')}</td>
       <td class="mono">${escapeHtml(p.model || '(自动)')}</td>
-      <td>${ts(new Date(r0.created_at * 1000).getTime() / 1000)}</td>
+      <td>${ts(r0.created_at)}</td>
       <td>${summary}</td>
     </tr>`;
   }).join('');
@@ -1046,9 +1092,9 @@ function baseLayout(extra = {}) {
     legend: { orientation: 'h', y: -0.22, x: 0, font: { size: 11.5 },
               bgcolor: 'rgba(0,0,0,0)' },
     xaxis: { gridcolor: cssvar('--grid'), zeroline: false, linecolor: cssvar('--axis'),
-             tickfont: { color: cssvar('--text-muted') }, title: { font: { size: 11.5 } } },
+             tickfont: { color: cssvar('--text-secondary') }, title: { font: { size: 11.5 } } },
     yaxis: { gridcolor: cssvar('--grid'), zeroline: false, linecolor: cssvar('--axis'),
-             tickfont: { color: cssvar('--text-muted') }, title: { font: { size: 11.5 } } },
+             tickfont: { color: cssvar('--text-secondary') }, title: { font: { size: 11.5 } } },
   }, extra);
 }
 

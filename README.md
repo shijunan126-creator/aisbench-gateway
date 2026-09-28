@@ -117,12 +117,21 @@ x86 和鲲鹏/昇腾机器都能原生跑。
 **随机数据集、sharegpt、合成数据集**需要一个**本地 tokenizer** 才能跑
 （用来做 token 计数 / 把文本调整到指定 token 长度）。aisbench 镜像里一个都不带。
 
-两种配法：
+所以 `./install.sh` 时会**强制要求**填一个模型目录（非交互安装必须带
+`--tokenizer` 参数）。填模型目录本身或装了多个模型的父目录都行：
 
-1. **推荐**：把 tokenizer 目录放进 `data/models/`，页面上填 `/work/models/<目录名>`。
-   这种方式随数据目录一起搬走，不用改配置。
-2. 编辑 `config.ini` 的 `tokenizer_dirs`，填**宿主机**上的模型目录（会按原路径挂进容器），
-   然后 `./stop.sh && ./start.sh`。
+```bash
+./install.sh --tokenizer /data/models
+```
+
+填好后，页面上的「模型 / Tokenizer 目录」只需要填**模型文件夹名**
+（如 `Qwen3.5-35B-A3B`），下拉框会列出扫描到的所有模型目录，提交时自动拼出完整路径。
+
+配法的完整说明：
+
+1. **推荐**：安装时（或事后在 `config.ini` 的 `tokenizer_dirs` 里）填宿主机上的
+   模型目录/父目录，start.sh 按原路径只读挂进容器。
+2. 把 tokenizer 目录放进 `data/models/`，页面上填 `/work/models/<目录名>`。
 
 其余数据集（gsm8k / mmlu / ceval / math 等）不需要 tokenizer。
 

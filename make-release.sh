@@ -177,7 +177,7 @@ to_single_platform() {
   arch="$(plat_arch "$plat")"
   tmp="${tar}.single"
   python3 - "$tar" "$tmp" "$arch" <<'PYEOF'
-import io, json, sys, tarfile
+import io, json, shutil, sys, tarfile
 
 src, dst, arch = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -190,7 +190,22 @@ with tarfile.open(src, "r:") as ti:
     annotations = lst_desc.get("annotations", {})
     lst = json.load(ti.extractfile("blobs/sha256/" + lst_desc["digest"].split(":")[1]))
     if "manifests" not in lst:
-        sys.exit("index.json 里没有 manifest list（本来就是单平台）")
+        # docker 经典存储（overlay2）下，本地 tag 只存**一个**平台：
+        # `--platform linux/arm64` 拉的镜像 save 出来就是单 manifest 而不是
+        # manifest list —— 这正是交付想要的形态，不该当失败处理。
+        # 这里读出它的架构，和目标一致就原样通过（tar 不动，交给后面的
+        # verify_image_tar 做完整性校验）；不一致才是真的平台错误。
+        cfg_digest = (lst.get("config") or {}).get("digest", "")
+        if not cfg_digest:
+            sys.exit("单 manifest tar 里读不到 config digest")
+        cfg = json.load(ti.extractfile("blobs/sha256/" + cfg_digest.split(":", 1)[1]))
+        arch_now = cfg.get("architecture", "?")
+        if arch_now == arch:
+            # 已经是目标的单平台：调用方靠「dst 文件存在」判断成功，
+            # 所以原样复制一份再退出，tar 内容不动
+            shutil.copyfile(src, dst)
+            sys.exit(0)
+        sys.exit(f"tar 是单平台 {arch_now}，与目标 {arch} 不符")
 
     target = next((s for s in lst["manifests"]
                    if s.get("platform", {}).get("architecture") == arch), None)

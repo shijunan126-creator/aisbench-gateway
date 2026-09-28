@@ -15,7 +15,7 @@ cd aisbench-gateway-*
 ./install.sh
 ```
 
-安装脚本自动完成：检查环境 → 导入镜像 → 铺数据集 → 写配置 → 启动服务，
+安装脚本自动完成：检查环境 → 架构校验 → 配置模型目录 → 导入镜像 → 启动服务，
 最后打印访问地址。
 
 **要求**：只需要 **Docker**。
@@ -23,7 +23,16 @@ cd aisbench-gateway-*
 不需要 python3，不需要联网，不需要 pip 装任何东西 —— 网关本身就跑在
 aisbench 容器里，用的就是容器自带的 Python。
 
-脚本可以重复执行：中途出错修好后再跑一次即可，已完成的步骤会自动跳过。
+**模型/tokenizer 目录是必填项**（随机数据集、GSM8K 前缀数据集、sharegpt 都需要它）。
+安装时会提示输入，填模型所在目录，或装了多个模型的**父目录**（如 `/data/models`，
+网关会自动扫描其中的模型文件夹，页面上按名字选择）。也可以非交互安装：
+
+```bash
+./install.sh --yes --tokenizer /data/models
+```
+
+脚本可以重复执行：中途出错修好后再跑一次即可，已完成的步骤会自动跳过
+（已配置的模型目录会保留，回车确认即可）。
 
 ### 分片包
 
@@ -178,13 +187,22 @@ docker logs -f aisbench-gateway 看实时日志
 ## 四、关于 tokenizer
 
 随机数据集（synthetic）、sharegpt 和合成数据集（GSM8K 前缀数据集）需要
-一个**本地 tokenizer** 才能跑，aisbench 镜像里不带任何 tokenizer。两种配法：
+一个**本地 tokenizer** 才能跑，aisbench 镜像里不带任何 tokenizer。
 
-**方式一（推荐）** 把 tokenizer 目录放进 `data/models/`，页面上填
-`/work/models/<目录名>`。这种方式随数据目录一起搬走，不用改配置。
+**安装时已经强制配置过一次**（填的是模型目录或装了多个模型的父目录）。
+页面上的「模型 / Tokenizer 目录」按以下方式填写：
 
-**方式二** 编辑 `config.ini` 里的 `aisbench.tokenizer_dirs`，填宿主机上的
-模型目录（多个用逗号分隔），改完执行 `./stop.sh && ./start.sh`。
+- 只填**模型文件夹名**，如 `Qwen3.5-35B-A3B`——输入框有下拉，列出的是
+  网关扫描到的所有模型目录（HuggingFace / ModelScope 下载的文件夹都认识），
+  提交时自动拼成完整路径
+- 也可以填完整路径（容器内路径；配置的目录按原路径只读挂进容器，
+  所以容器内路径与宿主机相同）
+
+事后想改目录：编辑 `config.ini` 里的 `aisbench.tokenizer_dirs`（多个用逗号分隔），
+改完执行 `./stop.sh && ./start.sh` 重建容器。
+
+另外也可以把 tokenizer 目录直接放进 `data/models/` 下，页面上填
+`/work/models/<目录名>` 引用，随数据目录一起搬走。
 
 其余数据集（gsm8k / mmlu / ceval / math 等）不需要 tokenizer。
 

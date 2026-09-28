@@ -1,0 +1,4 @@
+# 本项目在 Linux（客户机）上运行 shell 脚本，行尾必须是 LF。
+# Windows 上克隆时 git 默认 autocrlf 会把所有文本检出成 CRLF，
+# 导致 ./start.sh 等脚本报 `$'\r': command not found`。
+* text=auto eol=lf

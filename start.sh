@@ -14,7 +14,11 @@ ensure_config
 if ! require_docker; then exit 1; fi
 
 NAME="$(gw_container)"
-if container_running && http_ok; then
+
+# 提前返回的条件必须包含「挂载与配置一致」：用户手改了 config.ini 的
+# tokenizer_dirs 而容器还在跑时，直接返回会让新挂载永远不生效。
+if container_running && http_ok \
+   && [ "$(container_tokenizer_mounts)" = "$(desired_tokenizer_mounts)" ]; then
   echo "网关已经在运行"
   print_access_url
   exit 0

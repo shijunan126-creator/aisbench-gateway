@@ -60,10 +60,12 @@ container = aisbench-gateway
 # ——生成的 mmengine 配置里写死了这个路径。
 data = /work
 
-# 本地 tokenizer 目录，多个用逗号分隔。填**宿主机**上的模型目录，
-# 由 start.sh 按原路径只读挂进容器。
-# 随机数据集(synthetic)和 sharegpt **必须**有 tokenizer，否则 aisbench 直接报错，
-# 而镜像里不带任何 tokenizer。
+# 模型/tokenizer 目录，多个用逗号分隔。填**宿主机**上的路径，
+# 由 start.sh 按原路径只读挂进容器。可以填模型目录本身，也可以填装了
+# 多个模型的**父目录**（如 /data/models），网关会扫描其中的模型文件夹，
+# 页面上按目录名选择即可。
+# 随机数据集(synthetic)、sharegpt 和 GSM8K 前缀数据集**必须**提供，
+# 而镜像里不带任何 tokenizer（install.sh 安装时会强制要求填写）。
 # 也可以把 tokenizer 直接放进 <包目录>/data/models/，用 /work/models/<名字> 引用。
 tokenizer_dirs =
 
